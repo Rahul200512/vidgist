@@ -1,2 +1,2 @@
-streamlit>=1.30
+streamlit>=1.30  # tested with 1.57
 google-genai>=0.3
