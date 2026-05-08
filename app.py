@@ -54,25 +54,37 @@ YOUTUBE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-PROMPT = """You are a world-class video summarizer. Watch the provided video segment carefully.
+PROMPT = """You are a world-class video summarizer. Watch the provided video segment carefully and produce a thorough, information-rich summary.
 
 Return your response in exactly this Markdown structure:
 
 ## TL;DR
-A 2-3 sentence summary capturing the absolute essence of this segment.
+A 4-5 sentence summary capturing the essence of this segment, including the speaker (if identifiable), the topic, the main argument, and the conclusion.
 
 ## 🎯 Key Takeaways
-- 4 to 6 bullet points covering the most important ideas, insights, or arguments.
-- Be specific. Use concrete details from the video, not generic platitudes.
-- Each bullet should stand on its own.
+- 8 to 12 bullet points covering the most important ideas, insights, arguments, examples, and context.
+- Be specific and concrete. Use actual numbers, names, examples, and details from the video — never generic platitudes.
+- Each bullet should be substantive (1-2 sentences) and stand on its own.
+- Cover both *what* was said and *why it matters*.
+
+## 💬 Notable Quotes
+- 2 to 4 direct, memorable quotes from the speaker(s).
+- Format each as: > "Quote text here." — Speaker (if identifiable)
+- Pick quotes that are quotable on their own, not generic statements.
+
+## ⏱️ Worth Watching
+- 3 to 5 timestamps with what's noteworthy at each (use mm:ss or hh:mm:ss format).
+- Format: **0:42** — what happens at this point.
+- Pick the most insightful, surprising, or quotable moments — not the boring intro.
 
 ## ✅ Action Items
-- 2 to 4 practical things the viewer can apply, try, or remember.
+- 3 to 5 practical things the viewer can apply, try, or remember.
+- Be specific. "Read more books" is bad. "Read 'Atomic Habits' chapter 3 on habit stacking" is good.
 - If the video is purely informational with no actionable advice, write "(none — this is an informational video)".
 
 Do not include any preamble. Start directly with the `## TL;DR` heading."""
 
-MERGE_PROMPT = """Below are summaries of consecutive segments of a single long video. Combine them into ONE cohesive summary that reads as if it covered the whole video, using the same Markdown structure (## TL;DR / ## 🎯 Key Takeaways / ## ✅ Action Items). Deduplicate overlapping points and keep the most important 5-7 takeaways overall. Do not include any preamble — start directly with `## TL;DR`."""
+MERGE_PROMPT = """Below are summaries of consecutive segments of a single long video. Combine them into ONE cohesive summary that reads as if it covered the whole video, using the same Markdown structure (## TL;DR / ## 🎯 Key Takeaways / ## 💬 Notable Quotes / ## ⏱️ Worth Watching / ## ✅ Action Items). Deduplicate overlapping points, preserve the most important 8-12 takeaways overall, and keep all the most memorable quotes. For the timestamps, adjust them to reflect their position in the FULL video (e.g., a 5:00 timestamp in segment 2 of a video chunked at 30-min boundaries should become 35:00). Do not include any preamble — start directly with `## TL;DR`."""
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +112,15 @@ def make_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key.strip())
 
 
+# Deterministic config: same input → same (or near-identical) output
+GENERATION_CONFIG = types.GenerateContentConfig(
+    temperature=0.0,        # most deterministic
+    top_p=0.95,
+    top_k=1,                # always pick the most likely next token
+    max_output_tokens=4096,  # roomy enough for our richer summaries
+)
+
+
 def summarize_segment(
     client: genai.Client,
     url: str,
@@ -122,6 +143,7 @@ def summarize_segment(
     response = client.models.generate_content(
         model=MODEL,
         contents=types.Content(parts=[file_part, types.Part(text=PROMPT)]),
+        config=GENERATION_CONFIG,
     )
     return (response.text or "").strip()
 
@@ -133,6 +155,7 @@ def merge_summaries(client: genai.Client, summaries: list[str]) -> str:
     response = client.models.generate_content(
         model=MODEL,
         contents=f"{MERGE_PROMPT}\n\n{joined}",
+        config=GENERATION_CONFIG,
     )
     return (response.text or "").strip()
 
@@ -402,13 +425,13 @@ def main() -> None:
     # Estimated processing time hint
     if long_video_mode:
         st.caption(
-            "⏱️ Estimated time: **~2–4 minutes** for videos up to 2 hours "
-            "(chunks summarised in parallel-ish, then merged)."
+            "⏱️ **Expected time:** 2 min (1-hour video) · 3 min (90-min video) · 4 min (2-hour video). "
+            "Each 30-min chunk takes ~30–45s plus a 4s rate-limit pause + a final merge step."
         )
     else:
         st.caption(
-            "⏱️ Estimated time: **~20–60 seconds** depending on video length. "
-            "For videos longer than 50 minutes, tick chunked mode above."
+            "⏱️ **Expected time:** ~20s (under 5 min video) · ~30–60s (5–20 min) · ~60–90s (20–50 min). "
+            "Tick chunked mode above for videos longer than 50 minutes."
         )
 
     if not api_key and url_value:
@@ -437,17 +460,24 @@ def main() -> None:
                 msg = str(exc)
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     st.error(
-                        "🚦 Gemini rate limit reached on your key. Wait a minute and try again, "
-                        "or check your quota at [ai.google.dev/rate-limit](https://ai.google.dev/rate-limit)."
+                        "🚦 **Your Gemini API key has hit its quota limit.**\n\n"
+                        "**What to do:**\n"
+                        "- Wait ~1 minute and retry (per-minute limit reset), or\n"
+                        "- Wait until tomorrow if it's a daily limit (resets midnight Pacific), or\n"
+                        "- **Generate a new free key** at "
+                        "[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it above.\n\n"
+                        "Free tier limits: 15 requests/min, 1,500 requests/day per project. "
+                        "Each chunk uses 1 request — so a 2-hour video = 5 requests."
                     )
                 elif "API_KEY" in msg.upper() or "401" in msg or "403" in msg:
                     st.error(
-                        "Your API key was rejected. Please double-check it at "
-                        "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+                        "🔑 **Your API key was rejected.** It may be wrong, expired, or revoked.\n\n"
+                        "Generate a new free key at "
+                        "[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it above."
                     )
                 elif "video" in msg.lower() and ("long" in msg.lower() or "duration" in msg.lower()):
                     st.error(
-                        "This video is too long for a single Gemini call. "
+                        "📏 **This video is too long for a single Gemini call.** "
                         "Tick **🧩 Chunked mode** above and try again."
                     )
                 else:
