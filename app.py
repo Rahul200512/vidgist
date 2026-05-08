@@ -326,6 +326,9 @@ def render_api_key_input() -> str:
         if key and key != st.session_state.get("api_key", ""):
             cleaned = key.strip()
             st.session_state["api_key"] = cleaned
+            # Wipe any stale results / errors from a previous (bad-key) run
+            for stale_key in ("last_summary", "last_chunks", "last_error", "last_video_id"):
+                st.session_state.pop(stale_key, None)
             # Soft format hint — Gemini keys start with AIzaSy, are 39 chars
             if not cleaned.startswith("AIzaSy") or len(cleaned) < 35:
                 st.warning(
@@ -334,7 +337,9 @@ def render_api_key_input() -> str:
                     "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
                 )
             else:
-                st.success("✅ Key saved for this session.")
+                st.success("✅ Key saved. Old errors cleared — try again.")
+            # Force a fresh render so any error messages from the previous run disappear
+            st.rerun()
     return st.session_state.get("api_key", "")
 
 
@@ -378,6 +383,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
         segments: list[str] = []
         successful_chunks = 0
 
+        quota_hit = False
         for i, (start_s, end_s) in enumerate(chunks):
             remaining_chunks = len(chunks) - i
             eta_sec = remaining_chunks * SECONDS_PER_CHUNK_ESTIMATE + 15  # +15 for merge
@@ -398,20 +404,58 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                     successful_chunks += 1
             except Exception as exc:
                 msg = str(exc)
-                # Past the end of the video, Gemini errors out — that's our signal to stop.
+                # Past the end of the video → stop the loop quietly.
                 if "INVALID_ARGUMENT" in msg or "out of range" in msg.lower() or "empty video" in msg.lower():
+                    break
+                # Quota error → stop immediately and use what we have.
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                    quota_hit = True
                     break
                 st.warning(f"Chunk {i + 1} ({start_s // 60}–{end_s // 60} min) failed: {msg[:200]}")
             time.sleep(RATE_LIMIT_PAUSE)
 
-        if not segments:
-            st.error("Couldn't summarise any part of this video. Please double-check the URL.")
+        progress.empty()
+
+        if quota_hit and not segments:
+            st.error(
+                "🚦 **Your API key hit its quota before any chunk completed.**\n\n"
+                "**Fix:**\n"
+                "- Wait a minute and retry (per-minute limit), or\n"
+                "- Wait until tomorrow midnight Pacific (daily limit reset), or\n"
+                "- **Generate a new free key** at "
+                "[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it above."
+            )
             return
 
-        progress.progress(0.95, text="Merging chunk summaries…")
-        final = merge_summaries(client, segments) if len(segments) > 1 else segments[0]
-        progress.progress(1.0, text="Done!")
-        progress.empty()
+        if not segments:
+            st.error(
+                "Couldn't summarise any part of this video. "
+                "Please double-check the URL or try a different video."
+            )
+            return
+
+        if quota_hit:
+            st.warning(
+                f"🚦 **Your API key hit its quota partway through** "
+                f"(only {successful_chunks} of {len(chunks)} chunks completed). "
+                f"Showing a partial summary based on what we got. "
+                f"To get the full summary, generate a new free key at "
+                f"[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and re-run."
+            )
+
+        # Try to merge whatever we have — if even merge fails on quota, fall back
+        # to showing just the first segment.
+        if len(segments) > 1:
+            try:
+                final = merge_summaries(client, segments)
+            except Exception as exc:
+                if "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc):
+                    st.info("Skipping the merge step (quota exhausted) — showing the first segment instead.")
+                    final = segments[0]
+                else:
+                    raise
+        else:
+            final = segments[0]
 
         st.success(f"Combined {successful_chunks} segment summaries into one.")
         render_summary(final, info, was_chunked=True)
