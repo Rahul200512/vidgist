@@ -459,14 +459,17 @@ def main() -> None:
     # Optional: ask user for video length so we can compute an accurate ETA
     video_length_min = None
     if long_video_mode:
-        video_length_min = st.slider(
-            "Roughly how long is this video? (minutes)",
-            min_value=30,
-            max_value=240,
-            value=90,
-            step=15,
-            help="Just used to compute an accurate progress estimate. The summary itself works regardless.",
+        video_length_hours = st.slider(
+            "Roughly how long is this video? (hours)",
+            min_value=0.5,
+            max_value=4.0,
+            value=1.5,
+            step=0.5,
+            format="%.1f h",
+            help="Just used to compute an accurate progress estimate. "
+                 "The summary itself works regardless. Each 0.5h = one chunk.",
         )
+        video_length_min = int(video_length_hours * 60)
 
     go = st.button(
         "✨ Summarize video",
@@ -482,19 +485,20 @@ def main() -> None:
         eta_min = eta_sec // 60
         eta_rem_sec = eta_sec % 60
         eta_text = f"~{eta_min} min {eta_rem_sec}s" if eta_rem_sec else f"~{eta_min} min"
+        hours_label = f"{video_length_hours:.1f} h"
         st.caption(
-            f"⏱️ **Expected time for a {video_length_min}-min video: {eta_text}** "
-            f"({chunks_needed} chunks of 30 min + final merge step). "
-            f"Hard cap: 4-hour videos."
+            f"⏱️ **Expected time for a {hours_label} video: {eta_text}** "
+            f"({chunks_needed} chunks of 0.5 h + final merge step). "
+            f"Hard cap: 4 h videos."
         )
     elif long_video_mode:
         st.caption(
-            "⏱️ **Expected time:** ~2 min (1-hour) · ~3 min (90-min) · ~5 min (2-hour) · "
-            "~7-10 min (3-4 hour). Hard cap: 4-hour videos. Use the slider above for an accurate estimate."
+            "⏱️ **Expected time:** ~2 min (1 h) · ~3 min (1.5 h) · ~5 min (2.5 h) · "
+            "~7 min (4 h). Hard cap: 4-hour videos. Use the slider above for an accurate estimate."
         )
     else:
         st.caption(
-            "⏱️ **Expected time:** ~20s (under 5 min video) · ~30–60s (5–20 min) · ~60–90s (20–50 min). "
+            "⏱️ **Expected time:** ~20 s (under 5 min) · ~30–60 s (5–20 min) · ~60–90 s (20–50 min). "
             "**Tick chunked mode above for videos longer than 50 minutes** "
             "(otherwise Gemini will reject videos over ~3 hours with a frame-count error)."
         )
