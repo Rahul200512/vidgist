@@ -23,8 +23,9 @@ from google.genai import types
 
 MODEL = "gemini-flash-lite-latest"
 CHUNK_SIZE_SECONDS = 30 * 60           # 30-minute chunks
-MAX_VIDEO_SECONDS = 2 * 60 * 60        # hard cap at 2 hours
+MAX_VIDEO_SECONDS = 4 * 60 * 60        # hard cap at 4 hours (covers most podcasts)
 RATE_LIMIT_PAUSE = 4                   # seconds between chunk calls
+SECONDS_PER_CHUNK_ESTIMATE = 50        # avg time per chunk (Gemini call + pause)
 
 SAMPLE_VIDEOS = [
     {
@@ -65,7 +66,16 @@ Return your response in exactly this Markdown structure:
 - **Best for:** [one line on who would benefit most from watching]
 
 ## TL;DR
-A 5-6 sentence summary capturing the speaker, the topic, the central argument or thesis, the most important supporting points, and the conclusion or takeaway. Write so the reader knows whether the full video is worth their time.
+A detailed 8-10 sentence summary that someone can read instead of watching. Cover:
+- Who is speaking and what's their credibility / context (if identifiable)
+- The exact topic and the main question or problem the video answers
+- The central argument or thesis being made
+- The 3-5 most important supporting points, examples, or stories used
+- Any concrete numbers, frameworks, or specific examples mentioned
+- The conclusion, recommendation, or takeaway the speaker leaves you with
+- Why this video is or isn't worth watching in full
+
+Write it as flowing prose, not bullets. Be substantive — this should give the reader 80% of the value of watching.
 
 ## 🎯 Key Takeaways
 - 10 to 14 bullet points covering the most important ideas, insights, arguments, examples, frameworks, and context.
@@ -367,14 +377,16 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
         progress = st.progress(0.0, text="Starting chunked summarisation…")
         segments: list[str] = []
         successful_chunks = 0
-        # Rough per-chunk estimate (Gemini call + rate-limit pause + buffer)
-        SECONDS_PER_CHUNK = 45
 
         for i, (start_s, end_s) in enumerate(chunks):
             remaining_chunks = len(chunks) - i
-            eta_sec = remaining_chunks * SECONDS_PER_CHUNK + 15  # +15 for merge step
+            eta_sec = remaining_chunks * SECONDS_PER_CHUNK_ESTIMATE + 15  # +15 for merge
             eta_min = eta_sec // 60
-            eta_text = f"~{eta_min} min remaining" if eta_min >= 1 else f"~{eta_sec}s remaining"
+            eta_rem = eta_sec % 60
+            if eta_min >= 1:
+                eta_text = f"~{eta_min} min {eta_rem}s remaining" if eta_rem else f"~{eta_min} min remaining"
+            else:
+                eta_text = f"~{eta_sec}s remaining"
             progress.progress(
                 i / (len(chunks) + 1),
                 text=f"Summarising minute {start_s // 60}–{end_s // 60}… ({eta_text})",
@@ -444,6 +456,18 @@ def main() -> None:
              "Use this for podcasts or lectures over ~50 minutes. Takes longer.",
     )
 
+    # Optional: ask user for video length so we can compute an accurate ETA
+    video_length_min = None
+    if long_video_mode:
+        video_length_min = st.slider(
+            "Roughly how long is this video? (minutes)",
+            min_value=30,
+            max_value=240,
+            value=90,
+            step=15,
+            help="Just used to compute an accurate progress estimate. The summary itself works regardless.",
+        )
+
     go = st.button(
         "✨ Summarize video",
         type="primary",
@@ -451,16 +475,28 @@ def main() -> None:
         disabled=not (url_value and api_key),
     )
 
-    # Estimated processing time hint
-    if long_video_mode:
+    # Estimated processing time hint — dynamic
+    if long_video_mode and video_length_min:
+        chunks_needed = (video_length_min * 60 + CHUNK_SIZE_SECONDS - 1) // CHUNK_SIZE_SECONDS
+        eta_sec = chunks_needed * SECONDS_PER_CHUNK_ESTIMATE + 15  # +15 for merge
+        eta_min = eta_sec // 60
+        eta_rem_sec = eta_sec % 60
+        eta_text = f"~{eta_min} min {eta_rem_sec}s" if eta_rem_sec else f"~{eta_min} min"
         st.caption(
-            "⏱️ **Expected time:** 2 min (1-hour video) · 3 min (90-min video) · 4 min (2-hour video). "
-            "Each 30-min chunk takes ~30–45s plus a 4s rate-limit pause + a final merge step."
+            f"⏱️ **Expected time for a {video_length_min}-min video: {eta_text}** "
+            f"({chunks_needed} chunks of 30 min + final merge step). "
+            f"Hard cap: 4-hour videos."
+        )
+    elif long_video_mode:
+        st.caption(
+            "⏱️ **Expected time:** ~2 min (1-hour) · ~3 min (90-min) · ~5 min (2-hour) · "
+            "~7-10 min (3-4 hour). Hard cap: 4-hour videos. Use the slider above for an accurate estimate."
         )
     else:
         st.caption(
             "⏱️ **Expected time:** ~20s (under 5 min video) · ~30–60s (5–20 min) · ~60–90s (20–50 min). "
-            "Tick chunked mode above for videos longer than 50 minutes."
+            "**Tick chunked mode above for videos longer than 50 minutes** "
+            "(otherwise Gemini will reject videos over ~3 hours with a frame-count error)."
         )
 
     if not api_key and url_value:
@@ -504,6 +540,14 @@ def main() -> None:
                         "🔑 **Your API key was rejected.** It may be wrong, expired, or revoked.\n\n"
                         "Generate a new free key at "
                         "[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it above."
+                    )
+                elif "10800" in msg or ("images" in msg.lower() and "fewer" in msg.lower()):
+                    st.error(
+                        "📏 **This video is too long for a single Gemini call** "
+                        "(over ~3 hours of frames at default sampling).\n\n"
+                        "**Fix:** Tick **🧩 Chunked mode** above and try again — "
+                        "VidGist will split it into 30-minute chunks and merge the summaries. "
+                        "Hard cap is 4-hour videos."
                     )
                 elif "video" in msg.lower() and ("long" in msg.lower() or "duration" in msg.lower() or "size" in msg.lower()):
                     st.error(
