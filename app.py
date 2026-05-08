@@ -321,11 +321,17 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
         progress = st.progress(0.0, text="Starting chunked summarisation…")
         segments: list[str] = []
         successful_chunks = 0
+        # Rough per-chunk estimate (Gemini call + rate-limit pause + buffer)
+        SECONDS_PER_CHUNK = 45
 
         for i, (start_s, end_s) in enumerate(chunks):
+            remaining_chunks = len(chunks) - i
+            eta_sec = remaining_chunks * SECONDS_PER_CHUNK + 15  # +15 for merge step
+            eta_min = eta_sec // 60
+            eta_text = f"~{eta_min} min remaining" if eta_min >= 1 else f"~{eta_sec}s remaining"
             progress.progress(
                 i / (len(chunks) + 1),
-                text=f"Summarising minute {start_s // 60}–{end_s // 60}…",
+                text=f"Summarising minute {start_s // 60}–{end_s // 60}… ({eta_text})",
             )
             try:
                 seg = summarize_segment(client, info.canonical_url, start_s, end_s)
@@ -392,6 +398,18 @@ def main() -> None:
         use_container_width=True,
         disabled=not (url_value and api_key),
     )
+
+    # Estimated processing time hint
+    if long_video_mode:
+        st.caption(
+            "⏱️ Estimated time: **~2–4 minutes** for videos up to 2 hours "
+            "(chunks summarised in parallel-ish, then merged)."
+        )
+    else:
+        st.caption(
+            "⏱️ Estimated time: **~20–60 seconds** depending on video length. "
+            "For videos longer than 50 minutes, tick chunked mode above."
+        )
 
     if not api_key and url_value:
         st.warning("Please paste your Gemini API key above to continue.")
