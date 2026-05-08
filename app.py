@@ -54,37 +54,49 @@ YOUTUBE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-PROMPT = """You are a world-class video summarizer. Watch the provided video segment carefully and produce a thorough, information-rich summary.
+PROMPT = """You are a world-class video summarizer. Watch the provided video segment carefully and produce a thorough, information-rich summary that someone could read instead of watching the video.
 
 Return your response in exactly this Markdown structure:
 
+## 📌 At a Glance
+- **Type:** [tutorial / lecture / interview / podcast / vlog / talk / news / review / explainer / documentary]
+- **Topic:** [one-line topic in 8 words or less]
+- **Speaker / Channel:** [name if identifiable, else "Unknown"]
+- **Best for:** [one line on who would benefit most from watching]
+
 ## TL;DR
-A 4-5 sentence summary capturing the essence of this segment, including the speaker (if identifiable), the topic, the main argument, and the conclusion.
+A 5-6 sentence summary capturing the speaker, the topic, the central argument or thesis, the most important supporting points, and the conclusion or takeaway. Write so the reader knows whether the full video is worth their time.
 
 ## 🎯 Key Takeaways
-- 8 to 12 bullet points covering the most important ideas, insights, arguments, examples, and context.
-- Be specific and concrete. Use actual numbers, names, examples, and details from the video — never generic platitudes.
+- 10 to 14 bullet points covering the most important ideas, insights, arguments, examples, frameworks, and context.
+- Be specific and concrete. Use actual numbers, names, products, books, studies, dates, and examples mentioned in the video — never generic platitudes.
 - Each bullet should be substantive (1-2 sentences) and stand on its own.
-- Cover both *what* was said and *why it matters*.
+- Cover both *what* was said and *why it matters* or *how it works*.
 
 ## 💬 Notable Quotes
-- 2 to 4 direct, memorable quotes from the speaker(s).
+- 3 to 5 direct, memorable quotes from the speaker(s).
 - Format each as: > "Quote text here." — Speaker (if identifiable)
 - Pick quotes that are quotable on their own, not generic statements.
+- Preserve the exact wording.
 
 ## ⏱️ Worth Watching
-- 3 to 5 timestamps with what's noteworthy at each (use mm:ss or hh:mm:ss format).
+- 4 to 6 timestamps with a one-line description of what's noteworthy at each (mm:ss or hh:mm:ss).
 - Format: **0:42** — what happens at this point.
-- Pick the most insightful, surprising, or quotable moments — not the boring intro.
+- Pick the most insightful, surprising, funny, or quotable moments — not the intro/outro.
+
+## 🔑 Concepts & Terms
+- 3 to 6 important concepts, frameworks, jargon, or proper nouns the speaker uses.
+- Format: **Concept name** — one-line definition or context.
+- Skip if the video is purely conversational with no specialised concepts.
 
 ## ✅ Action Items
-- 3 to 5 practical things the viewer can apply, try, or remember.
+- 4 to 6 practical things the viewer can apply, try, or remember.
 - Be specific. "Read more books" is bad. "Read 'Atomic Habits' chapter 3 on habit stacking" is good.
-- If the video is purely informational with no actionable advice, write "(none — this is an informational video)".
+- If the video is purely informational with no actionable advice, write "(none — this is an informational/entertainment video)".
 
-Do not include any preamble. Start directly with the `## TL;DR` heading."""
+Do not include any preamble. Start directly with the `## 📌 At a Glance` heading."""
 
-MERGE_PROMPT = """Below are summaries of consecutive segments of a single long video. Combine them into ONE cohesive summary that reads as if it covered the whole video, using the same Markdown structure (## TL;DR / ## 🎯 Key Takeaways / ## 💬 Notable Quotes / ## ⏱️ Worth Watching / ## ✅ Action Items). Deduplicate overlapping points, preserve the most important 8-12 takeaways overall, and keep all the most memorable quotes. For the timestamps, adjust them to reflect their position in the FULL video (e.g., a 5:00 timestamp in segment 2 of a video chunked at 30-min boundaries should become 35:00). Do not include any preamble — start directly with `## TL;DR`."""
+MERGE_PROMPT = """Below are summaries of consecutive segments of a single long video. Combine them into ONE cohesive summary that reads as if it covered the whole video, using the same Markdown structure (## 📌 At a Glance / ## TL;DR / ## 🎯 Key Takeaways / ## 💬 Notable Quotes / ## ⏱️ Worth Watching / ## 🔑 Concepts & Terms / ## ✅ Action Items). Deduplicate overlapping points, preserve the most important 10-14 takeaways overall, and keep all the most memorable quotes. For the timestamps in ⏱️ Worth Watching, adjust them to reflect their position in the FULL video (e.g., a 5:00 timestamp in segment 2 of a video chunked at 30-min boundaries should become 35:00). Do not include any preamble — start directly with `## 📌 At a Glance`."""
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +302,9 @@ def render_api_key_input() -> str:
             "VidGist runs on **your own** free Gemini API key — your videos and key never touch any server I control.\n\n"
             "1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)\n"
             "2. Click **Create API key** (free, no credit card)\n"
-            "3. Paste it below"
+            "3. Paste it below\n\n"
+            "**Free tier limits:** 15 requests/min, 1,500 requests/day. "
+            "One short video = 1 request. A 2-hour video uses 5 requests (4 chunks + merge)."
         )
         key = st.text_input(
             "Paste your Gemini API key",
@@ -300,8 +314,17 @@ def render_api_key_input() -> str:
             label_visibility="collapsed",
         )
         if key and key != st.session_state.get("api_key", ""):
-            st.session_state["api_key"] = key.strip()
-            st.success("✅ Key saved for this session.")
+            cleaned = key.strip()
+            st.session_state["api_key"] = cleaned
+            # Soft format hint — Gemini keys start with AIzaSy, are 39 chars
+            if not cleaned.startswith("AIzaSy") or len(cleaned) < 35:
+                st.warning(
+                    "⚠️ This doesn't look like a typical Gemini key (should start with `AIzaSy` and be ~39 characters). "
+                    "Saving anyway — if it doesn't work, double-check at "
+                    "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+                )
+            else:
+                st.success("✅ Key saved for this session.")
     return st.session_state.get("api_key", "")
 
 
@@ -383,8 +406,13 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
     else:
         with st.spinner("Watching the video and writing your summary…"):
             summary = summarize_segment(client, info.canonical_url)
-        if not summary:
-            st.error("Gemini returned an empty summary. Please try again or enable chunked mode.")
+        if not summary or len(summary.strip()) < 30:
+            st.error(
+                "🤐 **Gemini returned an empty or very short summary.** "
+                "This usually means the video has no audio, is too long for a single call, "
+                "or was blocked by safety filters. Try ticking **🧩 Chunked mode**, "
+                "or pick a different video."
+            )
             return
         render_summary(summary, info, was_chunked=False)
 
@@ -406,7 +434,8 @@ def main() -> None:
         placeholder="https://www.youtube.com/watch?v=...",
         key="url_input",
     )
-    url_value = sample_picked or typed_url
+    # Strip whitespace, newlines, and trailing slashes that get pasted accidentally
+    url_value = (sample_picked or typed_url or "").strip().rstrip("/")
 
     long_video_mode = st.checkbox(
         "🧩 Chunked mode (for videos longer than ~50 minutes)",
@@ -458,6 +487,7 @@ def main() -> None:
                 run_summary(client, info, long_video_mode)
             except Exception as exc:
                 msg = str(exc)
+                msg_upper = msg.upper()
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     st.error(
                         "🚦 **Your Gemini API key has hit its quota limit.**\n\n"
@@ -469,19 +499,43 @@ def main() -> None:
                         "Free tier limits: 15 requests/min, 1,500 requests/day per project. "
                         "Each chunk uses 1 request — so a 2-hour video = 5 requests."
                     )
-                elif "API_KEY" in msg.upper() or "401" in msg or "403" in msg:
+                elif "API_KEY" in msg_upper or "401" in msg or "403" in msg or "PERMISSION_DENIED" in msg_upper or "UNAUTHENTICATED" in msg_upper:
                     st.error(
                         "🔑 **Your API key was rejected.** It may be wrong, expired, or revoked.\n\n"
                         "Generate a new free key at "
                         "[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and paste it above."
                     )
-                elif "video" in msg.lower() and ("long" in msg.lower() or "duration" in msg.lower()):
+                elif "video" in msg.lower() and ("long" in msg.lower() or "duration" in msg.lower() or "size" in msg.lower()):
                     st.error(
                         "📏 **This video is too long for a single Gemini call.** "
                         "Tick **🧩 Chunked mode** above and try again."
                     )
+                elif "SAFETY" in msg_upper or "BLOCKED" in msg_upper or "RECITATION" in msg_upper:
+                    st.error(
+                        "🛑 **Gemini blocked this video for safety/policy reasons.** "
+                        "This sometimes happens with copyrighted music videos, age-restricted content, or live streams. "
+                        "Try a different video."
+                    )
+                elif "NOT_FOUND" in msg_upper or "404" in msg or "could not" in msg.lower():
+                    st.error(
+                        "🚫 **Gemini couldn't access this video.** It may be private, deleted, region-blocked, "
+                        "age-gated, or a live stream. Try a different public video URL."
+                    )
+                elif "DEADLINE_EXCEEDED" in msg_upper or "timeout" in msg.lower():
+                    st.error(
+                        "⏱️ **Gemini timed out.** Long or complex videos sometimes do this. "
+                        "Try ticking **🧩 Chunked mode** above, or pick a shorter section of the video."
+                    )
+                elif "UNAVAILABLE" in msg_upper or "503" in msg or "500" in msg:
+                    st.error(
+                        "🌐 **Gemini's servers are temporarily unavailable.** Wait a moment and try again. "
+                        "If it keeps happening, check [status.cloud.google.com](https://status.cloud.google.com)."
+                    )
                 else:
-                    st.error(f"Something went wrong: {msg[:300]}")
+                    st.error(
+                        f"❌ Something went wrong:\n\n```\n{msg[:400]}\n```\n\n"
+                        f"Please try again, or open an issue on the GitHub repo with this error."
+                    )
 
     render_footer()
 
