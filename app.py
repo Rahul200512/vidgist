@@ -1,7 +1,7 @@
 """
 VidGist 🎬 — paste any YouTube URL, get an AI summary in seconds.
 
-Uses Gemini's native YouTube understanding (no transcript scraping required).
+Uses native YouTube video understanding (no transcript scraping required).
 For long videos (over ~50 minutes), automatically chunks into smaller segments
 and merges the summaries.
 """
@@ -25,14 +25,14 @@ MODEL = "gemini-flash-lite-latest"
 CHUNK_SIZE_SECONDS = 30 * 60           # 30-minute chunks
 MAX_VIDEO_SECONDS = 4 * 60 * 60        # hard cap at 4 hours (covers most podcasts)
 
-# Gemini free tier: 1M tokens/min. A 30-min video chunk uses ~250-500K tokens.
+# Free tier: 1M tokens/min. A 30-min video chunk uses ~250-500K tokens.
 # Pause 18s between chunks so we stay safely below the per-minute token budget.
 RATE_LIMIT_PAUSE = 18
 
 # When a chunk 429's, retry with these waits (auto-recover from transient TPM hits).
 RETRY_BACKOFF_SECONDS = (30, 60)
 
-SECONDS_PER_CHUNK_ESTIMATE = 65        # avg time per chunk (Gemini call + 18s pause)
+SECONDS_PER_CHUNK_ESTIMATE = 65        # avg time per chunk (AI call + 18s pause)
 
 SAMPLE_VIDEOS = [
     {
@@ -230,7 +230,7 @@ def summarize_segment(
     start_s: int | None = None,
     end_s: int | None = None,
 ) -> str:
-    """Call Gemini for a single video (or video segment if offsets provided)."""
+    """Call the model for a single video (or video segment if offsets provided)."""
     video_metadata = None
     if start_s is not None and end_s is not None:
         video_metadata = types.VideoMetadata(
@@ -260,7 +260,7 @@ def summarize_segment_with_retry(
 ) -> str:
     """Call summarize_segment with auto-backoff on transient TPM 429s.
 
-    Long videos chunked into 30-min slices burn through Gemini's
+    Long videos chunked into 30-min slices burn through the API's
     tokens-per-minute budget fast. Instead of giving up the moment a
     429 happens, wait and retry — usually the TPM window resets within
     30-60s and the next chunk goes through.
@@ -426,7 +426,7 @@ def render_hero() -> None:
             <div class="vg-hero-title">VidGist 🎬</div>
             <div class="vg-hero-sub">
                 Paste any YouTube URL. Get a TL;DR, key takeaways, and action items
-                in seconds — powered by Gemini's native video understanding.
+                in seconds — your videos never leave your browser session.
             </div>
         </div>
         """,
@@ -448,9 +448,9 @@ def render_footer() -> None:
 
 def render_api_key_input() -> str:
     expanded = not bool(st.session_state.get("api_key"))
-    with st.expander("🔑 Gemini API key (required, free, 60-second setup)", expanded=expanded):
+    with st.expander("🔑 API key (required, free, 60-second setup)", expanded=expanded):
         st.markdown(
-            "VidGist runs on **your own** free Gemini API key — your videos and key never touch any server I control.\n\n"
+            "VidGist runs on **your own** free API key — your videos and key never touch any server I control.\n\n"
             "1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)\n"
             "2. Click **Create API key** (free, no credit card)\n"
             "3. Paste it below\n\n"
@@ -458,7 +458,7 @@ def render_api_key_input() -> str:
             "One short video = 1 request. A 2-hour video uses 5 requests (4 chunks + merge)."
         )
         key = st.text_input(
-            "Paste your Gemini API key",
+            "Paste your API key",
             type="password",
             value=st.session_state.get("api_key", ""),
             placeholder="AIzaSy...",
@@ -470,10 +470,10 @@ def render_api_key_input() -> str:
             # Wipe any stale results / errors from a previous (bad-key) run
             for stale_key in ("last_summary", "last_chunks", "last_error", "last_video_id"):
                 st.session_state.pop(stale_key, None)
-            # Soft format hint — Gemini keys start with AIzaSy, are 39 chars
+            # Soft format hint — keys start with AIzaSy, are 39 chars
             if not cleaned.startswith("AIzaSy") or len(cleaned) < 35:
                 st.warning(
-                    "⚠️ This doesn't look like a typical Gemini key (should start with `AIzaSy` and be ~39 characters). "
+                    "⚠️ This doesn't look like a typical API key (should start with `AIzaSy` and be ~39 characters). "
                     "Saving anyway — if it doesn't work, double-check at "
                     "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
                 )
@@ -598,7 +598,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
 
                 # "Past end of video" — only quietly break if we ALREADY have at least
                 # one chunk. If the very first chunk fails with INVALID_ARGUMENT,
-                # that's a real problem (e.g. Gemini ignored our slicing and rejected
+                # that's a real problem (e.g. the model ignored our slicing and rejected
                 # the whole 4-hour video), so we should propagate the real error.
                 is_past_end = (
                     "INVALID_ARGUMENT" in msg
@@ -610,7 +610,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                 # 10,800-image / frame-count error → real issue, surface it cleanly.
                 if "10800" in msg or ("images" in lower and "fewer" in lower):
                     first_failure_msg = (
-                        "Gemini hit its frame-count limit even on a single chunk "
+                        "The AI hit its frame-count limit even on a single chunk "
                         "— this video has unusually dense visuals (e.g. lots of cuts or text)."
                     )
                     break
@@ -622,10 +622,10 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
 
                 # Safety / blocked / not found → real issue, surface it.
                 if any(s in msg.upper() for s in ("SAFETY", "BLOCKED", "RECITATION")):
-                    first_failure_msg = "Gemini blocked this video for policy reasons (often happens with copyrighted music videos, age-restricted content, or live streams)."
+                    first_failure_msg = "The AI blocked this video for policy reasons (often happens with copyrighted music videos, age-restricted content, or live streams)."
                     break
                 if "NOT_FOUND" in msg.upper() or "404" in msg:
-                    first_failure_msg = "Gemini couldn't access this video — it may be private, deleted, region-blocked, age-gated, or a live stream."
+                    first_failure_msg = "The AI couldn't access this video — it may be private, deleted, region-blocked, age-gated, or a live stream."
                     break
 
                 # Unknown error: capture the first one for diagnostic and warn.
@@ -658,8 +658,8 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             else:
                 st.error(
                     "❌ **Couldn't summarise any chunk of this video.** "
-                    "Gemini returned empty responses for every segment. "
-                    "This sometimes happens with audio-less videos, live streams, or content Gemini can't access. "
+                    "The AI returned empty responses for every segment. "
+                    "This sometimes happens with audio-less videos, live streams, or content the AI can't access. "
                     "Try a different video URL."
                 )
             return
@@ -676,7 +676,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             merge_status = st.empty()
             merge_status.info(
                 "🧵 **Stitching segments together…** "
-                "Gemini is now reading all the segment summaries and weaving them into one TL;DR + Key Takeaways view. "
+                "VidGist is now reading all the segment summaries and weaving them into one TL;DR + Key Takeaways view. "
                 "This usually takes 10–20 seconds. Almost there!"
             )
             try:
@@ -737,9 +737,10 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
         # first-time users don't think the page is frozen.
         status = st.status("🎬 Watching your video — this usually takes 20–90 seconds…", expanded=True)
         with status:
-            st.write("Sending the video to Gemini for analysis…")
-            st.write("Gemini is now watching the audio + visuals and extracting key points.")
-            st.write("Building the TL;DR, takeaways, quotes, and timestamps…")
+            st.write("📡 Sending the video off for analysis…")
+            st.write("👀 The AI is now watching the audio + visuals and pulling out the key points.")
+            st.write("✍️ Building your TL;DR, takeaways, quotes, and timestamps…")
+            st.write("🧵 Almost there — just stitching the final summary together…")
             try:
                 summary = summarize_segment(client, info.canonical_url)
             except Exception:
@@ -749,7 +750,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
 
         if not summary or len(summary.strip()) < 30:
             st.error(
-                "🤐 **Gemini returned an empty or very short summary.** "
+                "🤐 **The AI returned an empty or very short summary.** "
                 "This usually means the video has no audio, is too long for a single call, "
                 "or was blocked by safety filters. Try ticking **🧩 Chunked mode**, "
                 "or pick a different video."
@@ -812,7 +813,7 @@ def main() -> None:
     # Tiny hint right under the button so first-time users know what to do
     # without seeing it as a scary warning when they haven't filled things in yet.
     if not api_key:
-        st.caption("☝️ Paste your free Gemini API key above first.")
+        st.caption("☝️ Paste your free API key above first.")
     elif not url_value:
         st.caption("☝️ Paste a YouTube URL above (or click a sample), then press the button.")
 
@@ -838,12 +839,12 @@ def main() -> None:
         st.caption(
             "⏱️ **Expected time:** ~20 s (under 5 min) · ~30–60 s (5–20 min) · ~60–90 s (20–50 min). "
             "**Tick chunked mode above for videos longer than 50 minutes** "
-            "(otherwise Gemini will reject videos over ~3 hours with a frame-count error)."
+            "(otherwise videos over ~3 hours get rejected with a frame-count error)."
         )
 
     # On click, validate first so users get a clear message instead of silently nothing.
     if go and not api_key:
-        st.warning("⚠️ Please paste your Gemini API key in the section above first.")
+        st.warning("⚠️ Please paste your API key in the section above first.")
         render_footer()
         return
     if go and not url_value:
@@ -862,7 +863,7 @@ def main() -> None:
             try:
                 client = make_client(api_key)
             except Exception as exc:
-                st.error(f"Couldn't initialise Gemini client: {exc}")
+                st.error(f"Couldn't initialise the AI client: {exc}")
                 render_footer()
                 return
 
@@ -873,7 +874,7 @@ def main() -> None:
                 msg_upper = msg.upper()
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     st.error(
-                        "🚦 **Your Gemini API key has hit its quota limit.**\n\n"
+                        "🚦 **Your API key has hit its quota limit.**\n\n"
                         "**What to do:**\n"
                         "- Wait ~1 minute and retry (per-minute limit reset), or\n"
                         "- Wait until tomorrow if it's a daily limit (resets midnight Pacific), or\n"
@@ -890,7 +891,7 @@ def main() -> None:
                     )
                 elif "10800" in msg or ("images" in msg.lower() and "fewer" in msg.lower()):
                     st.error(
-                        "📏 **This video is too long for a single Gemini call** "
+                        "📏 **This video is too long for a single AI call** "
                         "(over ~3 hours of frames at default sampling).\n\n"
                         "**Fix:** Tick **🧩 Chunked mode** above and try again — "
                         "VidGist will split it into 30-minute chunks and merge the summaries. "
@@ -898,28 +899,28 @@ def main() -> None:
                     )
                 elif "video" in msg.lower() and ("long" in msg.lower() or "duration" in msg.lower() or "size" in msg.lower()):
                     st.error(
-                        "📏 **This video is too long for a single Gemini call.** "
+                        "📏 **This video is too long for a single AI call.** "
                         "Tick **🧩 Chunked mode** above and try again."
                     )
                 elif "SAFETY" in msg_upper or "BLOCKED" in msg_upper or "RECITATION" in msg_upper:
                     st.error(
-                        "🛑 **Gemini blocked this video for safety/policy reasons.** "
+                        "🛑 **The AI blocked this video for safety/policy reasons.** "
                         "This sometimes happens with copyrighted music videos, age-restricted content, or live streams. "
                         "Try a different video."
                     )
                 elif "NOT_FOUND" in msg_upper or "404" in msg or "could not" in msg.lower():
                     st.error(
-                        "🚫 **Gemini couldn't access this video.** It may be private, deleted, region-blocked, "
+                        "🚫 **The AI couldn't access this video.** It may be private, deleted, region-blocked, "
                         "age-gated, or a live stream. Try a different public video URL."
                     )
                 elif "DEADLINE_EXCEEDED" in msg_upper or "timeout" in msg.lower():
                     st.error(
-                        "⏱️ **Gemini timed out.** Long or complex videos sometimes do this. "
+                        "⏱️ **The AI timed out.** Long or complex videos sometimes do this. "
                         "Try ticking **🧩 Chunked mode** above, or pick a shorter section of the video."
                     )
                 elif "UNAVAILABLE" in msg_upper or "503" in msg or "500" in msg:
                     st.error(
-                        "🌐 **Gemini's servers are temporarily unavailable.** Wait a moment and try again. "
+                        "🌐 **The AI service is temporarily unavailable.** Wait a moment and try again. "
                         "If it keeps happening, check [status.cloud.google.com](https://status.cloud.google.com)."
                     )
                 else:
