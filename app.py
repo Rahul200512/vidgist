@@ -106,7 +106,68 @@ Write it as flowing prose, not bullets. Be substantive — this should give the 
 
 Do not include any preamble. Start directly with the `## 📌 At a Glance` heading."""
 
-MERGE_PROMPT = """Below are summaries of consecutive segments of a single long video. Combine them into ONE cohesive summary that reads as if it covered the whole video, using the same Markdown structure (## 📌 At a Glance / ## TL;DR / ## 🎯 Key Takeaways / ## 💬 Notable Quotes / ## ⏱️ Worth Watching / ## 🔑 Concepts & Terms / ## ✅ Action Items). Deduplicate overlapping points, preserve the most important 10-14 takeaways overall, and keep all the most memorable quotes. For the timestamps in ⏱️ Worth Watching, adjust them to reflect their position in the FULL video (e.g., a 5:00 timestamp in segment 2 of a video chunked at 30-min boundaries should become 35:00). Do not include any preamble — start directly with `## 📌 At a Glance`."""
+def build_merge_prompt(num_chunks: int, total_minutes: int) -> str:
+    # Scale section sizes with chunk count so a 4-hour video gets a proportionally bigger summary.
+    min_takeaways = max(12, num_chunks * 3)              # ≥3 per chunk, min 12
+    min_quotes = max(4, num_chunks)                       # ≥1 per chunk, min 4
+    min_timestamps = max(6, num_chunks * 2)               # 2 per chunk, min 6
+    tldr_sentences = "10-12" if num_chunks >= 4 else "8-10"
+
+    return f"""You are merging {num_chunks} consecutive segment summaries of a single {total_minutes}-minute video into ONE comprehensive summary.
+
+CRITICAL: This is a long video. Do NOT over-compress. Preserve detail from EVERY segment — readers want to know what happened in every part of the video, not just the highlights.
+
+Use exactly this Markdown structure:
+
+## 📌 At a Glance
+- **Type:** [tutorial/lecture/interview/podcast/vlog/talk/news/review/explainer/documentary]
+- **Topic:** [one-line topic in 8 words or less]
+- **Speaker / Channel:** [name if identifiable]
+- **Length:** {total_minutes} minutes ({num_chunks} segments)
+- **Best for:** [one-line audience description]
+
+## TL;DR
+A flowing {tldr_sentences} sentence summary covering the speaker, central thesis, the major ideas across the WHOLE video (not just the first 30 minutes), key examples, and the conclusion. For long videos, mention how the content develops or shifts over time.
+
+## 🗂️ Section by Section
+For EACH segment, write 3-5 bullet points covering what happens in that 30-minute window. Format:
+
+### Minutes 0–30
+- Bullet 1
+- Bullet 2
+- Bullet 3
+
+### Minutes 30–60
+- Bullet 1
+- ...
+
+(Continue for ALL {num_chunks} segments. Do not skip any.)
+
+## 🎯 Key Takeaways
+- AT LEAST {min_takeaways} bullet points, drawn from across the WHOLE video.
+- At least 3 takeaways per segment of the video — don't load up on the first segments and skip the later ones.
+- Be specific: numbers, names, frameworks, concrete examples.
+
+## 💬 Notable Quotes
+- AT LEAST {min_quotes} direct quotes spread across the video.
+- Format: > "Quote." — Speaker (timestamp if identifiable)
+- Pick at least one quote from each part of the video — early, middle, late.
+
+## ⏱️ Worth Watching
+- AT LEAST {min_timestamps} timestamps spread across the WHOLE video.
+- AT LEAST 1-2 timestamps from each segment — do not cluster them all in the first hour.
+- Adjust timestamps to reflect position in the FULL video. A "5:00" inside segment 2 of a 30-min-chunked video means 35:00 in the full video.
+- Format: **35:00** — what's notable.
+
+## 🔑 Concepts & Terms
+- 5-10 important concepts, frameworks, jargon, or proper nouns from across the whole video.
+- Format: **Term** — one-line definition or context.
+
+## ✅ Action Items
+- 5-8 specific, practical things the viewer can apply, try, or remember.
+- Cover advice from across the video, not just one section.
+
+Do not include any preamble. Start directly with `## 📌 At a Glance`."""
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +200,7 @@ GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0.0,        # most deterministic
     top_p=0.95,
     top_k=1,                # always pick the most likely next token
-    max_output_tokens=4096,  # roomy enough for our richer summaries
+    max_output_tokens=8192,  # large enough for full 4-hour merged output
 )
 
 
@@ -171,12 +232,23 @@ def summarize_segment(
 
 
 def merge_summaries(client: genai.Client, summaries: list[str]) -> str:
-    joined = "\n\n---\n\n".join(
-        f"### Segment {i + 1}\n\n{s}" for i, s in enumerate(summaries)
-    )
+    num_chunks = len(summaries)
+    total_minutes = num_chunks * (CHUNK_SIZE_SECONDS // 60)
+    merge_prompt = build_merge_prompt(num_chunks, total_minutes)
+
+    # Label each segment with its actual time range so the LLM can adjust timestamps correctly.
+    joined_parts = []
+    for i, s in enumerate(summaries):
+        start_min = i * (CHUNK_SIZE_SECONDS // 60)
+        end_min = start_min + (CHUNK_SIZE_SECONDS // 60)
+        joined_parts.append(
+            f"### Segment {i + 1} (full-video minutes {start_min}–{end_min})\n\n{s}"
+        )
+    joined = "\n\n---\n\n".join(joined_parts)
+
     response = client.models.generate_content(
         model=MODEL,
-        contents=f"{MERGE_PROMPT}\n\n{joined}",
+        contents=f"{merge_prompt}\n\nHere are the {num_chunks} segment summaries to merge:\n\n{joined}",
         config=GENERATION_CONFIG,
     )
     return (response.text or "").strip()
@@ -355,14 +427,46 @@ def render_samples() -> str | None:
     return chosen
 
 
-def render_summary(summary: str, info: VideoInfo, was_chunked: bool) -> None:
+def render_summary(
+    summary: str,
+    info: VideoInfo,
+    was_chunked: bool,
+    chunk_summaries: list[str] | None = None,
+) -> None:
     st.video(info.canonical_url)
     if was_chunked:
-        st.info("🧩 This was a long video — VidGist split it into 30-minute chunks and merged the summaries.")
+        st.info(
+            "🧩 This was a long video — VidGist split it into 30-minute chunks. "
+            "Below is the merged summary; expand the per-segment details further down "
+            "for the full chunk-by-chunk breakdown."
+        )
     st.markdown(summary)
+
+    # Compose the downloadable file: merged summary + all chunk details
+    download_content = summary
+    if chunk_summaries and len(chunk_summaries) > 1:
+        st.divider()
+        st.subheader("🔍 Per-segment details")
+        st.caption(
+            "Each 30-minute segment summarised in full — expand any segment to read "
+            "the complete summary for that part of the video."
+        )
+        chunk_block_lines = ["", "---", "", "# Per-Segment Summaries", ""]
+        for i, seg in enumerate(chunk_summaries):
+            start_min = i * (CHUNK_SIZE_SECONDS // 60)
+            end_min = start_min + (CHUNK_SIZE_SECONDS // 60)
+            label = f"Segment {i + 1} · minutes {start_min}–{end_min}"
+            with st.expander(label):
+                st.markdown(seg)
+            chunk_block_lines.append(f"## {label}")
+            chunk_block_lines.append("")
+            chunk_block_lines.append(seg)
+            chunk_block_lines.append("")
+        download_content = summary + "\n".join(chunk_block_lines)
+
     st.download_button(
         "💾 Download summary as Markdown",
-        data=summary,
+        data=download_content,
         file_name=f"vidgist-{info.video_id}.md",
         mime="text/markdown",
         use_container_width=True,
@@ -458,7 +562,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             final = segments[0]
 
         st.success(f"Combined {successful_chunks} segment summaries into one.")
-        render_summary(final, info, was_chunked=True)
+        render_summary(final, info, was_chunked=True, chunk_summaries=segments)
     else:
         with st.spinner("Watching the video and writing your summary…"):
             summary = summarize_segment(client, info.canonical_url)
