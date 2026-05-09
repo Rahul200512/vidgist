@@ -53,9 +53,3 @@ sidebar, and try a sample video.
 ## Author
 
 Built by **Rahul** · [LinkedIn](https://www.linkedin.com/in/rahul-reddy-avula-37572b328/)
-
-## Credits
-
-Scaffolded on top of an open-source Streamlit YouTube summariser, then
-heavily rewritten to use the modern `google.genai` SDK with Gemini's
-native video-understanding API.
