@@ -545,6 +545,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
         successful_chunks = 0
 
         quota_hit = False
+        first_failure_msg: str | None = None
         for i, (start_s, end_s) in enumerate(chunks):
             remaining_chunks = len(chunks) - i
             eta_sec = remaining_chunks * SECONDS_PER_CHUNK_ESTIMATE + 15  # +15 for merge
@@ -576,13 +577,48 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                     successful_chunks += 1
             except Exception as exc:
                 msg = str(exc)
-                # Past the end of the video → stop the loop quietly.
-                if "INVALID_ARGUMENT" in msg or "out of range" in msg.lower() or "empty video" in msg.lower():
-                    break
+                lower = msg.lower()
+
                 # Quota still exhausted after all retries → stop and use what we have.
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     quota_hit = True
                     break
+
+                # "Past end of video" — only quietly break if we ALREADY have at least
+                # one chunk. If the very first chunk fails with INVALID_ARGUMENT,
+                # that's a real problem (e.g. Gemini ignored our slicing and rejected
+                # the whole 4-hour video), so we should propagate the real error.
+                is_past_end = (
+                    "INVALID_ARGUMENT" in msg
+                    and ("offset" in lower or "duration" in lower or "out of range" in lower or "empty video" in lower)
+                )
+                if is_past_end and segments:
+                    break
+
+                # 10,800-image / frame-count error → real issue, surface it cleanly.
+                if "10800" in msg or ("images" in lower and "fewer" in lower):
+                    first_failure_msg = (
+                        "Gemini hit its frame-count limit even on a single chunk "
+                        "— this video has unusually dense visuals (e.g. lots of cuts or text)."
+                    )
+                    break
+
+                # Bad/expired key, permission denied → real issue, propagate.
+                if any(s in msg.upper() for s in ("API_KEY", "PERMISSION_DENIED", "UNAUTHENTICATED")) or "401" in msg or "403" in msg:
+                    first_failure_msg = "API key rejected. Generate a fresh key at aistudio.google.com/apikey."
+                    break
+
+                # Safety / blocked / not found → real issue, surface it.
+                if any(s in msg.upper() for s in ("SAFETY", "BLOCKED", "RECITATION")):
+                    first_failure_msg = "Gemini blocked this video for policy reasons (often happens with copyrighted music videos, age-restricted content, or live streams)."
+                    break
+                if "NOT_FOUND" in msg.upper() or "404" in msg:
+                    first_failure_msg = "Gemini couldn't access this video — it may be private, deleted, region-blocked, age-gated, or a live stream."
+                    break
+
+                # Unknown error: capture the first one for diagnostic and warn.
+                if first_failure_msg is None:
+                    first_failure_msg = msg[:400]
                 st.warning(f"Chunk {i + 1} ({start_s // 60}–{end_s // 60} min) failed: {msg[:200]}")
             time.sleep(RATE_LIMIT_PAUSE)
 
@@ -600,10 +636,20 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             return
 
         if not segments:
-            st.error(
-                "Couldn't summarise any part of this video. "
-                "Please double-check the URL or try a different video."
-            )
+            # Show the actual reason chunk 1 failed instead of a generic message.
+            if first_failure_msg:
+                st.error(
+                    f"❌ **Couldn't summarise any chunk of this video.**\n\n"
+                    f"**Reason:** {first_failure_msg}\n\n"
+                    f"Try a different video, or untick chunked mode if it's under 50 minutes."
+                )
+            else:
+                st.error(
+                    "❌ **Couldn't summarise any chunk of this video.** "
+                    "Gemini returned empty responses for every segment. "
+                    "This sometimes happens with audio-less videos, live streams, or content Gemini can't access. "
+                    "Try a different video URL."
+                )
             return
 
         # Build the final summary — merged if we have all chunks, otherwise raw.
