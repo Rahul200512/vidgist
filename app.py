@@ -64,6 +64,14 @@ YOUTUBE_URL_RE = re.compile(
 
 PROMPT = """You are a world-class video summarizer. Watch the provided video segment carefully and produce a thorough, information-rich summary that someone could read instead of watching the video.
 
+CRITICAL ACCURACY RULES (read these first):
+- ONLY summarise what is actually in the video. Do NOT invent facts, names, numbers, quotes, or timestamps.
+- If you cannot identify the speaker, write "Unknown" — do not guess based on the topic.
+- If something isn't said or shown in the video, do NOT include it. Fewer accurate bullets > more fabricated ones.
+- Quotes must be word-for-word from the audio, not paraphrased into pseudo-quotes.
+- Timestamps must reflect actual moments in the video segment you watched.
+- Do not state the exact total duration of the video in minutes — focus on the content.
+
 Return your response in exactly this Markdown structure:
 
 ## 📌 At a Glance
@@ -113,28 +121,32 @@ Write it as flowing prose, not bullets. Be substantive — this should give the 
 
 Do not include any preamble. Start directly with the `## 📌 At a Glance` heading."""
 
-def build_merge_prompt(num_chunks: int, total_minutes: int) -> str:
+def build_merge_prompt(num_chunks: int) -> str:
     # Scale section sizes with chunk count so a 4-hour video gets a proportionally bigger summary.
     min_takeaways = max(12, num_chunks * 3)              # ≥3 per chunk, min 12
     min_quotes = max(4, num_chunks)                       # ≥1 per chunk, min 4
     min_timestamps = max(6, num_chunks * 2)               # 2 per chunk, min 6
     tldr_sentences = "10-12" if num_chunks >= 4 else "8-10"
 
-    return f"""You are merging {num_chunks} consecutive segment summaries of a single {total_minutes}-minute video into ONE comprehensive summary.
+    return f"""You are merging {num_chunks} consecutive segment summaries of a single video into ONE comprehensive summary.
 
-CRITICAL: This is a long video. Do NOT over-compress. Preserve detail from EVERY segment — readers want to know what happened in every part of the video, not just the highlights.
+CRITICAL ACCURACY RULES:
+- ONLY use information that is in the segment summaries below. Do NOT invent, guess, or extrapolate facts.
+- Do NOT state the video's exact duration in minutes — you don't know it precisely. If you must reference length, write "the video" or "this multi-segment video", never a specific minute count.
+- If a segment summary says "no speaker identified", do NOT make up a name.
+- If something isn't covered in the source summaries, do NOT include it.
+- Preserve detail from EVERY segment — readers want to know what happened in every part of the video, not just the highlights.
 
 Use exactly this Markdown structure:
 
 ## 📌 At a Glance
-- **Type:** [tutorial/lecture/interview/podcast/vlog/talk/news/review/explainer/documentary]
-- **Topic:** [one-line topic in 8 words or less]
-- **Speaker / Channel:** [name if identifiable]
-- **Length:** {total_minutes} minutes ({num_chunks} segments)
+- **Type:** [tutorial/lecture/interview/podcast/vlog/talk/news/review/explainer/documentary — pick the best fit based on the segment summaries]
+- **Topic:** [one-line topic in 8 words or less, drawn from the segments]
+- **Speaker / Channel:** [name if identifiable from the segments, else "Unknown"]
 - **Best for:** [one-line audience description]
 
 ## TL;DR
-A flowing {tldr_sentences} sentence summary covering the speaker, central thesis, the major ideas across the WHOLE video (not just the first 30 minutes), key examples, and the conclusion. For long videos, mention how the content develops or shifts over time.
+A flowing {tldr_sentences} sentence summary covering the speaker, central thesis, the major ideas across the whole video (not just the first 30 minutes), key examples, and the conclusion. For long videos, mention how the content develops or shifts over time. Do NOT include the exact duration in minutes.
 
 ## 🗂️ Section by Section
 For EACH segment, write 3-5 bullet points covering what happens in that 30-minute window. Format:
@@ -148,30 +160,31 @@ For EACH segment, write 3-5 bullet points covering what happens in that 30-minut
 - Bullet 1
 - ...
 
-(Continue for ALL {num_chunks} segments. Do not skip any.)
+(Continue for ALL {num_chunks} segments. Do not skip any. Do not invent content for segments that aren't in the source.)
 
 ## 🎯 Key Takeaways
-- AT LEAST {min_takeaways} bullet points, drawn from across the WHOLE video.
-- At least 3 takeaways per segment of the video — don't load up on the first segments and skip the later ones.
-- Be specific: numbers, names, frameworks, concrete examples.
+- AT LEAST {min_takeaways} bullet points, drawn from across the whole video.
+- At least 3 takeaways per segment — don't load up on the first segments and skip the later ones.
+- Be specific: numbers, names, frameworks, concrete examples — but ONLY ones actually mentioned in the source summaries.
 
 ## 💬 Notable Quotes
 - AT LEAST {min_quotes} direct quotes spread across the video.
 - Format: > "Quote." — Speaker (timestamp if identifiable)
 - Pick at least one quote from each part of the video — early, middle, late.
+- ONLY use quotes that appear in the source segment summaries. Do not paraphrase into pseudo-quotes.
 
 ## ⏱️ Worth Watching
-- AT LEAST {min_timestamps} timestamps spread across the WHOLE video.
+- AT LEAST {min_timestamps} timestamps spread across the whole video.
 - AT LEAST 1-2 timestamps from each segment — do not cluster them all in the first hour.
 - Adjust timestamps to reflect position in the FULL video. A "5:00" inside segment 2 of a 30-min-chunked video means 35:00 in the full video.
 - Format: **35:00** — what's notable.
 
 ## 🔑 Concepts & Terms
-- 5-10 important concepts, frameworks, jargon, or proper nouns from across the whole video.
+- 5-10 important concepts, frameworks, jargon, or proper nouns drawn from the segments.
 - Format: **Term** — one-line definition or context.
 
 ## ✅ Action Items
-- 5-8 specific, practical things the viewer can apply, try, or remember.
+- 5-8 specific, practical things the viewer can apply, try, or remember, drawn from the source segments.
 - Cover advice from across the video, not just one section.
 
 Do not include any preamble. Start directly with `## 📌 At a Glance`."""
@@ -278,8 +291,7 @@ def summarize_segment_with_retry(
 
 def merge_summaries(client: genai.Client, summaries: list[str]) -> str:
     num_chunks = len(summaries)
-    total_minutes = num_chunks * (CHUNK_SIZE_SECONDS // 60)
-    merge_prompt = build_merge_prompt(num_chunks, total_minutes)
+    merge_prompt = build_merge_prompt(num_chunks)
 
     # Label each segment with its actual time range so the LLM can adjust timestamps correctly.
     joined_parts = []
