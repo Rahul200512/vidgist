@@ -269,6 +269,18 @@ def setup_page() -> None:
     st.markdown(
         """
         <style>
+            /* Hide Streamlit's default chrome so visitors only see the VidGist UI:
+               - the hamburger / Deploy menu (top-right, includes 'View source' / 'Fork' on community cloud)
+               - the toolbar (the bar that shows the running status + GitHub icon)
+               - the 'Made with Streamlit' footer */
+            #MainMenu {visibility: hidden !important;}
+            header[data-testid="stHeader"] {visibility: hidden !important; height: 0 !important;}
+            [data-testid="stToolbar"] {display: none !important;}
+            footer {visibility: hidden !important;}
+            .stDeployButton {display: none !important;}
+            /* Streamlit Community Cloud's "Hosted with Streamlit" badge */
+            div[class^="viewerBadge_"], a[class^="viewerBadge_"] {display: none !important;}
+
             .stApp {
                 background: radial-gradient(
                     ellipse 60% 30% at 50% 0%,
