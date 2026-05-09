@@ -755,12 +755,21 @@ def main() -> None:
         )
         video_length_min = int(video_length_hours * 60)
 
+    # Always-clickable button — validation happens on submit so users don't
+    # get blocked by Streamlit's text-input timing (text_input only pushes
+    # to session_state on Enter / blur, which made the disabled flag stale).
     go = st.button(
         "✨ Summarize video",
         type="primary",
         use_container_width=True,
-        disabled=not (url_value and api_key),
     )
+
+    # Tiny hint right under the button so first-time users know what to do
+    # without seeing it as a scary warning when they haven't filled things in yet.
+    if not api_key:
+        st.caption("☝️ Paste your free Gemini API key above first.")
+    elif not url_value:
+        st.caption("☝️ Paste a YouTube URL above (or click a sample), then press the button.")
 
     # Estimated processing time hint — dynamic
     if long_video_mode and video_length_min:
@@ -787,10 +796,15 @@ def main() -> None:
             "(otherwise Gemini will reject videos over ~3 hours with a frame-count error)."
         )
 
-    if not api_key and url_value:
-        st.warning("Please paste your Gemini API key above to continue.")
-    if not url_value and api_key:
-        st.info("Paste a YouTube URL or click a sample video to try it out.")
+    # On click, validate first so users get a clear message instead of silently nothing.
+    if go and not api_key:
+        st.warning("⚠️ Please paste your Gemini API key in the section above first.")
+        render_footer()
+        return
+    if go and not url_value:
+        st.warning("⚠️ Please paste a YouTube URL above (or click a sample) before summarising.")
+        render_footer()
+        return
 
     # Auto-run when a sample button is pressed (only if API key is set)
     should_run = go or (sample_picked and api_key)
