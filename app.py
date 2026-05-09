@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 import streamlit as st
@@ -209,6 +211,57 @@ def parse_youtube_url(url: str) -> VideoInfo | None:
         return None
     vid = m.group(1)
     return VideoInfo(video_id=vid, canonical_url=f"https://www.youtube.com/watch?v={vid}")
+
+
+def _parse_iso8601_duration(s: str) -> int:
+    """Parse 'PT4H1M27S' style ISO 8601 durations to total seconds."""
+    m = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$", s)
+    if not m:
+        return 0
+    h = int(m.group(1) or 0)
+    mi = int(m.group(2) or 0)
+    se = int(m.group(3) or 0)
+    return h * 3600 + mi * 60 + se
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_video_duration_seconds(video_id: str) -> int | None:
+    """Fetch a YouTube video's duration in seconds by scraping the public watch page.
+
+    Returns None if the lookup fails (live stream, blocked IP, network error,
+    private video, etc.) — caller should fall back to manual slider.
+    """
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read(2_000_000).decode("utf-8", errors="ignore")  # cap at 2 MB
+
+        # Try ISO 8601 meta tag first
+        m = re.search(r'<meta\s+itemprop="duration"\s+content="([^"]+)"', html)
+        if m:
+            secs = _parse_iso8601_duration(m.group(1))
+            if secs > 0:
+                return secs
+
+        # Fallback: lengthSeconds appears in YouTube's embedded player config
+        m = re.search(r'"lengthSeconds":"(\d+)"', html)
+        if m:
+            secs = int(m.group(1))
+            if secs > 0:
+                return secs
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    return None
 
 
 def make_client(api_key: str) -> genai.Client:
@@ -779,27 +832,62 @@ def main() -> None:
     # Strip whitespace, newlines, and trailing slashes that get pasted accidentally
     url_value = (sample_picked or typed_url or "").strip().rstrip("/")
 
+    # Auto-detect video length so we can pick chunked vs single-call mode
+    # without making the user think about it.
+    detected_seconds: int | None = None
+    detected_hours: float | None = None
+    auto_long: bool = False
+    parsed_for_detect = parse_youtube_url(url_value)
+    if parsed_for_detect:
+        detected_seconds = fetch_video_duration_seconds(parsed_for_detect.video_id)
+        if detected_seconds:
+            detected_hours = detected_seconds / 3600
+            # Anything over 50 minutes auto-routes to chunked mode.
+            auto_long = detected_seconds > 50 * 60
+
+    if detected_seconds:
+        h = detected_seconds // 3600
+        m = (detected_seconds % 3600) // 60
+        if h > 0:
+            length_label = f"{h} h {m:02d} min"
+        else:
+            length_label = f"{m} min"
+        if auto_long:
+            st.info(
+                f"🎬 Detected video length: **{length_label}** — using chunked mode "
+                f"(splits into 30-min chunks and merges)."
+            )
+        else:
+            st.info(f"🎬 Detected video length: **{length_label}** — using single-call mode.")
+
+    # Manual override checkbox (advanced) — pre-checked if we auto-detected long.
     long_video_mode = st.checkbox(
         "🧩 Chunked mode (for videos longer than ~50 minutes)",
-        value=False,
+        value=auto_long,
         help="Splits the video into 30-minute chunks and merges the summaries. "
-             "Use this for podcasts or lectures over ~50 minutes. Takes longer.",
+             "Auto-enabled for videos longer than 50 minutes. "
+             "Take this off only if you know the video is short and detection got it wrong.",
     )
 
-    # Optional: ask user for video length so we can compute an accurate ETA
-    video_length_min = None
+    # Compute video_length_min for ETA: prefer detected, else user slider, else 90 default
+    video_length_min: int | None = None
     if long_video_mode:
-        video_length_hours = st.slider(
-            "Roughly how long is this video? (hours)",
-            min_value=0.5,
-            max_value=4.0,
-            value=1.5,
-            step=0.5,
-            format="%.1f h",
-            help="Just used to compute an accurate progress estimate. "
-                 "The summary itself works regardless. Each 0.5h = one chunk.",
-        )
-        video_length_min = int(video_length_hours * 60)
+        if detected_seconds:
+            # Auto-detected — no slider needed
+            video_length_min = max(30, (detected_seconds + 59) // 60)
+        else:
+            # Detection failed — show slider as fallback
+            video_length_hours = st.slider(
+                "Couldn't auto-detect — roughly how long is this video? (hours)",
+                min_value=0.5,
+                max_value=4.0,
+                value=1.5,
+                step=0.5,
+                format="%.1f h",
+                help="Used to compute an accurate progress estimate. "
+                     "Detection may have been blocked by the network — slider is a fallback.",
+            )
+            video_length_min = int(video_length_hours * 60)
 
     # Always-clickable button — validation happens on submit so users don't
     # get blocked by Streamlit's text-input timing (text_input only pushes
