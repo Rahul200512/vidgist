@@ -24,8 +24,15 @@ from google.genai import types
 MODEL = "gemini-flash-lite-latest"
 CHUNK_SIZE_SECONDS = 30 * 60           # 30-minute chunks
 MAX_VIDEO_SECONDS = 4 * 60 * 60        # hard cap at 4 hours (covers most podcasts)
-RATE_LIMIT_PAUSE = 4                   # seconds between chunk calls
-SECONDS_PER_CHUNK_ESTIMATE = 50        # avg time per chunk (Gemini call + pause)
+
+# Gemini free tier: 1M tokens/min. A 30-min video chunk uses ~250-500K tokens.
+# Pause 18s between chunks so we stay safely below the per-minute token budget.
+RATE_LIMIT_PAUSE = 18
+
+# When a chunk 429's, retry with these waits (auto-recover from transient TPM hits).
+RETRY_BACKOFF_SECONDS = (30, 60)
+
+SECONDS_PER_CHUNK_ESTIMATE = 65        # avg time per chunk (Gemini call + 18s pause)
 
 SAMPLE_VIDEOS = [
     {
@@ -229,6 +236,44 @@ def summarize_segment(
         config=GENERATION_CONFIG,
     )
     return (response.text or "").strip()
+
+
+def summarize_segment_with_retry(
+    client: genai.Client,
+    url: str,
+    start_s: int,
+    end_s: int,
+    on_wait: callable | None = None,
+) -> str:
+    """Call summarize_segment with auto-backoff on transient TPM 429s.
+
+    Long videos chunked into 30-min slices burn through Gemini's
+    tokens-per-minute budget fast. Instead of giving up the moment a
+    429 happens, wait and retry — usually the TPM window resets within
+    30-60s and the next chunk goes through.
+    """
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate((0,) + RETRY_BACKOFF_SECONDS):
+        if delay:
+            if on_wait:
+                on_wait(delay, attempt)
+            time.sleep(delay)
+        try:
+            return summarize_segment(client, url, start_s, end_s)
+        except Exception as exc:
+            msg = str(exc)
+            last_exc = exc
+            # Past-end-of-video / fatal errors → propagate immediately, don't retry.
+            if any(needle in msg for needle in ("INVALID_ARGUMENT", "API_KEY", "PERMISSION_DENIED", "401", "403")):
+                raise
+            # Transient quota hit → retry with backoff.
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                continue
+            # Unknown error → propagate.
+            raise
+    if last_exc:
+        raise last_exc
+    return ""
 
 
 def merge_summaries(client: genai.Client, summaries: list[str]) -> str:
@@ -513,8 +558,19 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                 i / (len(chunks) + 1),
                 text=f"Summarising minute {start_s // 60}–{end_s // 60}… ({eta_text})",
             )
+
+            # Per-chunk waiting indicator for retries
+            chunk_label = f"Minute {start_s // 60}–{end_s // 60}"
+            def on_retry_wait(delay: int, attempt: int, _label=chunk_label, _i=i, _total=len(chunks)):
+                progress.progress(
+                    _i / (_total + 1),
+                    text=f"{_label}: hit per-minute limit, waiting {delay}s before retry…",
+                )
+
             try:
-                seg = summarize_segment(client, info.canonical_url, start_s, end_s)
+                seg = summarize_segment_with_retry(
+                    client, info.canonical_url, start_s, end_s, on_wait=on_retry_wait
+                )
                 if seg:
                     segments.append(seg)
                     successful_chunks += 1
@@ -523,7 +579,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                 # Past the end of the video → stop the loop quietly.
                 if "INVALID_ARGUMENT" in msg or "out of range" in msg.lower() or "empty video" in msg.lower():
                     break
-                # Quota error → stop immediately and use what we have.
+                # Quota still exhausted after all retries → stop and use what we have.
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
                     quota_hit = True
                     break
@@ -550,30 +606,52 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             )
             return
 
-        if quota_hit:
-            st.warning(
-                f"🚦 **Your API key hit its quota partway through** "
-                f"(only {successful_chunks} of {len(chunks)} chunks completed). "
-                f"Showing a partial summary based on what we got. "
-                f"To get the full summary, generate a new free key at "
-                f"[aistudio.google.com/apikey](https://aistudio.google.com/apikey) and re-run."
-            )
-
-        # Try to merge whatever we have — if even merge fails on quota, fall back
-        # to showing just the first segment.
+        # Build the final summary — merged if we have all chunks, otherwise raw.
+        merge_skipped_for_quota = False
         if len(segments) > 1:
             try:
                 final = merge_summaries(client, segments)
             except Exception as exc:
                 if "RESOURCE_EXHAUSTED" in str(exc) or "429" in str(exc):
-                    st.info("Skipping the merge step (quota exhausted) — showing the first segment instead.")
-                    final = segments[0]
+                    merge_skipped_for_quota = True
+                    # Concatenate all segments instead of dropping data — user gets
+                    # every chunk's content even if the merge call couldn't run.
+                    final = "\n\n---\n\n".join(
+                        f"## Segment {i + 1} (minutes {i * 30}–{(i + 1) * 30})\n\n{s}"
+                        for i, s in enumerate(segments)
+                    )
                 else:
                     raise
         else:
             final = segments[0]
 
-        st.success(f"Combined {successful_chunks} segment summaries into one.")
+        # ONE consolidated status message — no contradictions.
+        if quota_hit and merge_skipped_for_quota:
+            st.warning(
+                f"🚦 **Your key hit its per-minute or daily token limit** "
+                f"(only {successful_chunks} of {len(chunks)} chunks ran, and the merge step couldn't run either). "
+                f"Showing the raw per-segment summaries below. "
+                f"To get a clean merged summary, wait a minute or generate a fresh free key at "
+                f"[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+            )
+        elif quota_hit:
+            st.warning(
+                f"🚦 **Your key hit its per-minute or daily token limit partway through** "
+                f"(only {successful_chunks} of {len(chunks)} chunks completed). "
+                f"The summary below covers minutes 0–{successful_chunks * 30} only. "
+                f"To get the full video summary, wait a minute or generate a fresh free key at "
+                f"[aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+            )
+        elif merge_skipped_for_quota:
+            st.warning(
+                "🚦 **Hit the token limit on the final merge step.** "
+                "All chunks were summarised — showing them as raw per-segment summaries below "
+                "rather than a single merged view. Wait a minute and click Summarize again "
+                "to get the merged version."
+            )
+        else:
+            st.success(f"✅ Combined {successful_chunks} segment summaries into one.")
+
         render_summary(final, info, was_chunked=True, chunk_summaries=segments)
     else:
         with st.spinner("Watching the video and writing your summary…"):
