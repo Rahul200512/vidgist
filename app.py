@@ -634,9 +634,8 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                 st.warning(f"Chunk {i + 1} ({start_s // 60}–{end_s // 60} min) failed: {msg[:200]}")
             time.sleep(RATE_LIMIT_PAUSE)
 
-        progress.empty()
-
         if quota_hit and not segments:
+            progress.empty()
             st.error(
                 "🚦 **Your API key hit its quota before any chunk completed.**\n\n"
                 "**Fix:**\n"
@@ -648,6 +647,7 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
             return
 
         if not segments:
+            progress.empty()
             # Show the actual reason chunk 1 failed instead of a generic message.
             if first_failure_msg:
                 st.error(
@@ -664,9 +664,21 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                 )
             return
 
-        # Build the final summary — merged if we have all chunks, otherwise raw.
+        # Keep the progress bar visible during merge so users see SOMETHING happening.
+        # The merge step takes ~10-15 seconds — silent dead-time was making people
+        # think the app froze.
         merge_skipped_for_quota = False
         if len(segments) > 1:
+            progress.progress(
+                len(chunks) / (len(chunks) + 1),
+                text=f"Merging {len(segments)} segment summaries into one cohesive summary…",
+            )
+            merge_status = st.empty()
+            merge_status.info(
+                "🧵 **Stitching segments together…** "
+                "Gemini is now reading all the segment summaries and weaving them into one TL;DR + Key Takeaways view. "
+                "This usually takes 10–20 seconds. Almost there!"
+            )
             try:
                 final = merge_summaries(client, segments)
             except Exception as exc:
@@ -679,9 +691,18 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
                         for i, s in enumerate(segments)
                     )
                 else:
+                    merge_status.empty()
+                    progress.empty()
                     raise
+            merge_status.empty()
+            progress.progress(1.0, text="✅ Done — rendering your summary…")
+            time.sleep(0.6)  # let users register the "done" state before progress disappears
+            progress.empty()
         else:
             final = segments[0]
+            progress.progress(1.0, text="✅ Done — rendering your summary…")
+            time.sleep(0.4)
+            progress.empty()
 
         # ONE consolidated status message — no contradictions.
         if quota_hit and merge_skipped_for_quota:
@@ -712,8 +733,20 @@ def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) ->
 
         render_summary(final, info, was_chunked=True, chunk_summaries=segments)
     else:
-        with st.spinner("Watching the video and writing your summary…"):
-            summary = summarize_segment(client, info.canonical_url)
+        # Single-video path: typically 20-90 seconds. Show what's happening so
+        # first-time users don't think the page is frozen.
+        status = st.status("🎬 Watching your video — this usually takes 20–90 seconds…", expanded=True)
+        with status:
+            st.write("Sending the video to Gemini for analysis…")
+            st.write("Gemini is now watching the audio + visuals and extracting key points.")
+            st.write("Building the TL;DR, takeaways, quotes, and timestamps…")
+            try:
+                summary = summarize_segment(client, info.canonical_url)
+            except Exception:
+                status.update(label="❌ Something went wrong", state="error", expanded=True)
+                raise
+            status.update(label="✅ Done — rendering your summary…", state="complete", expanded=False)
+
         if not summary or len(summary.strip()) < 30:
             st.error(
                 "🤐 **Gemini returned an empty or very short summary.** "
