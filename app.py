@@ -633,16 +633,21 @@ def run_summary(
     """
     if long_video_mode:
         # Cap chunk generation by the known duration when we have one.
+        # Use the duration as a hard upper bound so a 60-minute video gets
+        # exactly 2 chunks (not 3), and a 230-minute video gets 8 chunks
+        # where the last one covers minutes 210-230 (real content).
         upper_bound = MAX_VIDEO_SECONDS
         if estimated_video_seconds:
-            upper_bound = min(MAX_VIDEO_SECONDS, estimated_video_seconds + 60)  # +1min safety
+            upper_bound = min(MAX_VIDEO_SECONDS, estimated_video_seconds)
 
         chunks: list[tuple[int, int]] = []
         t = 0
-        while t < upper_bound:
+        # Only emit a chunk if there's at least 60 seconds of content in it —
+        # avoids emitting a chunk that starts exactly at the video's end.
+        while t + 60 < upper_bound:
             chunks.append((t, t + CHUNK_SIZE_SECONDS))
             t += CHUNK_SIZE_SECONDS
-        if not chunks:  # detected duration was tiny — at least try one chunk
+        if not chunks:  # very short detected video — try at least one chunk
             chunks.append((0, CHUNK_SIZE_SECONDS))
 
         progress = st.progress(0.0, text="Starting chunked summarisation…")
