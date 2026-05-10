@@ -473,19 +473,43 @@ def setup_page() -> None:
             }
             .vg-footer {
                 text-align: center;
-                margin-top: 48px;
-                padding: 20px;
-                color: #64748b;
-                font-size: 13px;
+                margin-top: 56px;
+                padding: 32px 20px 20px;
                 border-top: 1px solid rgba(255,255,255,0.06);
             }
-            .vg-footer a {
-                color: #14b8a6;
+            .vg-footer-built {
+                color: #64748b;
+                font-size: 13px;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                margin-bottom: 6px;
+            }
+            .vg-footer-name {
+                display: inline-block;
+                font-size: clamp(1.6rem, 4vw, 2.2rem);
+                font-weight: 800;
+                letter-spacing: -0.02em;
+                background: linear-gradient(135deg, #ffffff 25%, #5eead4 60%, #14b8a6 100%);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+                text-decoration: none !important;
+                margin-bottom: 8px;
+                line-height: 1.1;
+            }
+            .vg-footer-name:hover {
+                opacity: 0.85;
+            }
+            .vg-footer-link {
+                font-size: 13px;
+            }
+            .vg-footer-link a {
+                color: #5eead4;
                 font-weight: 500;
                 text-decoration: none;
             }
-            .vg-footer a:hover {
-                color: #5eead4;
+            .vg-footer-link a:hover {
+                color: #14b8a6;
                 text-decoration: underline;
             }
         </style>
@@ -514,8 +538,13 @@ def render_footer() -> None:
     st.markdown(
         """
         <div class="vg-footer">
-            Built by Rahul ·
-            <a href="https://www.linkedin.com/in/rahul-reddy-avula-37572b328/" target="_blank">LinkedIn</a>
+            <div class="vg-footer-built">Built by</div>
+            <a href="https://www.linkedin.com/in/rahul-reddy-avula-37572b328/" target="_blank" class="vg-footer-name">
+                Rahul Reddy
+            </a>
+            <div class="vg-footer-link">
+                <a href="https://www.linkedin.com/in/rahul-reddy-avula-37572b328/" target="_blank">Connect on LinkedIn →</a>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
