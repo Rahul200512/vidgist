@@ -912,7 +912,16 @@ def main() -> None:
         eta_min = eta_sec // 60
         eta_rem_sec = eta_sec % 60
         eta_text = f"~{eta_min} min {eta_rem_sec}s" if eta_rem_sec else f"~{eta_min} min"
-        hours_label = f"{video_length_hours:.1f} h"
+        # Build hours_label from video_length_min so it works whether we
+        # auto-detected or used the slider fallback.
+        h = video_length_min // 60
+        m = video_length_min % 60
+        if h and m:
+            hours_label = f"{h} h {m:02d} min"
+        elif h:
+            hours_label = f"{h} h"
+        else:
+            hours_label = f"{m} min"
         st.caption(
             f"⏱️ **Expected time for a {hours_label} video: {eta_text}** "
             f"({chunks_needed} chunks of 0.5 h + final merge step). "
