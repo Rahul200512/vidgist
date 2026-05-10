@@ -226,13 +226,38 @@ def _parse_iso8601_duration(s: str) -> int:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_video_duration_seconds(video_id: str) -> int | None:
-    """Fetch a YouTube video's duration in seconds by scraping the public watch page.
+    """Fetch a YouTube video's duration in seconds.
 
-    Returns None if the lookup fails (live stream, blocked IP, network error,
-    private video, etc.) — caller should fall back to manual slider.
+    Tries yt-dlp first (handles YouTube's anti-bot measures, works on cloud
+    IPs that block plain HTTP scraping). Falls back to direct HTML scraping
+    if yt-dlp isn't available. Returns None if both fail (live stream,
+    private video, network blocked, etc.).
     """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Primary: yt-dlp (uses YouTube's internal innertube API, handles cloud
+    # IP blocks that break plain HTML scraping)
     try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        from yt_dlp import YoutubeDL
+        with YoutubeDL({
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": False,
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+            duration = info.get("duration")
+            if duration and duration > 0:
+                return int(duration)
+    except ImportError:
+        pass  # yt-dlp not installed — try fallback
+    except Exception:
+        pass  # network error, video unavailable, etc. — try fallback
+
+    # Fallback: direct HTML scraping (for environments where yt-dlp is blocked
+    # but the watch page itself loads).
+    try:
         req = urllib.request.Request(
             url,
             headers={
@@ -244,16 +269,14 @@ def fetch_video_duration_seconds(video_id: str) -> int | None:
             },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read(2_000_000).decode("utf-8", errors="ignore")  # cap at 2 MB
+            html = resp.read(2_000_000).decode("utf-8", errors="ignore")
 
-        # Try ISO 8601 meta tag first
         m = re.search(r'<meta\s+itemprop="duration"\s+content="([^"]+)"', html)
         if m:
             secs = _parse_iso8601_duration(m.group(1))
             if secs > 0:
                 return secs
 
-        # Fallback: lengthSeconds appears in YouTube's embedded player config
         m = re.search(r'"lengthSeconds":"(\d+)"', html)
         if m:
             secs = int(m.group(1))
