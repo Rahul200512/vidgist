@@ -595,15 +595,32 @@ def render_summary(
     )
 
 
-def run_summary(client: genai.Client, info: VideoInfo, long_video_mode: bool) -> None:
-    """Drive the full summarisation flow + render results."""
+def run_summary(
+    client: genai.Client,
+    info: VideoInfo,
+    long_video_mode: bool,
+    estimated_video_seconds: int | None = None,
+) -> None:
+    """Drive the full summarisation flow + render results.
+
+    `estimated_video_seconds` (when known) lets us generate exactly the
+    chunks needed instead of always trying 8 (and then having the trailing
+    ones error out 'past end of video'). This makes the per-chunk
+    progress ETA accurate.
+    """
     if long_video_mode:
-        # Chunked path: 0–30, 30–60, 60–90, 90–120 min (capped at 2h)
+        # Cap chunk generation by the known duration when we have one.
+        upper_bound = MAX_VIDEO_SECONDS
+        if estimated_video_seconds:
+            upper_bound = min(MAX_VIDEO_SECONDS, estimated_video_seconds + 60)  # +1min safety
+
         chunks: list[tuple[int, int]] = []
         t = 0
-        while t < MAX_VIDEO_SECONDS:
+        while t < upper_bound:
             chunks.append((t, t + CHUNK_SIZE_SECONDS))
             t += CHUNK_SIZE_SECONDS
+        if not chunks:  # detected duration was tiny — at least try one chunk
+            chunks.append((0, CHUNK_SIZE_SECONDS))
 
         progress = st.progress(0.0, text="Starting chunked summarisation…")
         segments: list[str] = []
@@ -965,7 +982,12 @@ def main() -> None:
                 return
 
             try:
-                run_summary(client, info, long_video_mode)
+                # Pass detected duration (if any) so chunk generation matches
+                # the actual video length and the per-chunk ETA is accurate.
+                est_seconds = detected_seconds
+                if est_seconds is None and video_length_min:
+                    est_seconds = video_length_min * 60
+                run_summary(client, info, long_video_mode, estimated_video_seconds=est_seconds)
             except Exception as exc:
                 msg = str(exc)
                 msg_upper = msg.upper()
